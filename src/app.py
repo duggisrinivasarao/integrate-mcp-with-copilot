@@ -5,11 +5,16 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
+from pydantic import BaseModel, Field
 import os
 from pathlib import Path
+import secrets
+import time
+
+from src.teacher_auth import load_teacher_accounts, verify_password
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
@@ -18,6 +23,35 @@ app = FastAPI(title="Mergington High School API",
 current_dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
           "static")), name="static")
+TEACHERS_FILE = current_dir / "teachers.json"
+SESSION_COOKIE = "teacher_session"
+SESSION_TTL_SECONDS = 12 * 60 * 60
+sessions: dict[str, tuple[str, float]] = {}
+
+
+class TeacherCredentials(BaseModel):
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+def current_teacher(request: Request) -> str | None:
+    token = request.cookies.get(SESSION_COOKIE)
+    session = sessions.get(token) if token else None
+    if session is None:
+        return None
+
+    username, expires_at = session
+    if expires_at <= time.time():
+        sessions.pop(token, None)
+        return None
+    return username
+
+
+def require_teacher(request: Request) -> str:
+    username = current_teacher(request)
+    if username is None:
+        raise HTTPException(status_code=401, detail="Teacher login required")
+    return username
 
 # In-memory activity database
 activities = {
@@ -88,9 +122,80 @@ def get_activities():
     return activities
 
 
+@app.post("/auth/login")
+def login(credentials: TeacherCredentials, request: Request, response: Response):
+    try:
+        teachers = load_teacher_accounts(TEACHERS_FILE)
+    except FileNotFoundError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="Teacher accounts are not configured",
+        ) from error
+    except (ValueError, OSError) as error:
+        raise HTTPException(
+            status_code=500,
+            detail="Teacher account configuration is invalid",
+        ) from error
+
+    account = teachers.get(credentials.username)
+    if account is None:
+        verify_password(credentials.password, "00" * 16, "00" * 32)
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    if not verify_password(
+        credentials.password, account["salt"], account["password_hash"]
+    ):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    now = time.time()
+    expired_sessions = [
+        token for token, (_, expires_at) in sessions.items()
+        if expires_at <= now
+    ]
+    for token in expired_sessions:
+        sessions.pop(token, None)
+
+    token = secrets.token_urlsafe(32)
+    sessions[token] = (credentials.username, now + SESSION_TTL_SECONDS)
+    response.set_cookie(
+        key=SESSION_COOKIE,
+        value=token,
+        max_age=SESSION_TTL_SECONDS,
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="strict",
+        path="/",
+    )
+    return {"username": credentials.username}
+
+
+@app.get("/auth/me")
+def get_current_teacher(request: Request):
+    username = current_teacher(request)
+    if username is None:
+        raise HTTPException(status_code=401, detail="Teacher login required")
+    return {"username": username}
+
+
+@app.post("/auth/logout")
+def logout(request: Request, response: Response):
+    token = request.cookies.get(SESSION_COOKIE)
+    if token:
+        sessions.pop(token, None)
+    response.delete_cookie(
+        key=SESSION_COOKIE,
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="strict",
+        path="/",
+    )
+    return {"message": "Logged out"}
+
+
 @app.post("/activities/{activity_name}/signup")
-def signup_for_activity(activity_name: str, email: str):
+def signup_for_activity(activity_name: str, email: str, request: Request):
     """Sign up a student for an activity"""
+    require_teacher(request)
+
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
@@ -111,8 +216,10 @@ def signup_for_activity(activity_name: str, email: str):
 
 
 @app.delete("/activities/{activity_name}/unregister")
-def unregister_from_activity(activity_name: str, email: str):
+def unregister_from_activity(activity_name: str, email: str, request: Request):
     """Unregister a student from an activity"""
+    require_teacher(request)
+
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
