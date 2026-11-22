@@ -15,13 +15,22 @@ A super simple FastAPI application that allows students to view and sign up for 
    pip install fastapi uvicorn
    ```
 
-2. Run the application:
+2. Create a teacher login. Passwords are stored as salted PBKDF2 hashes in a
+   local file that is excluded from Git:
 
    ```
-   python app.py
+   python -m src.create_teacher
    ```
 
-3. Open your browser and go to:
+   Repeat the command to add another teacher or replace an existing password.
+
+3. Run the application from the repository root:
+
+   ```
+   uvicorn src.app:app --reload
+   ```
+
+4. Open your browser and go to:
    - API documentation: http://localhost:8000/docs
    - Alternative documentation: http://localhost:8000/redoc
 
@@ -30,7 +39,16 @@ A super simple FastAPI application that allows students to view and sign up for 
 | Method | Endpoint                                                          | Description                                                         |
 | ------ | ----------------------------------------------------------------- | ------------------------------------------------------------------- |
 | GET    | `/activities`                                                     | Get all activities with their details and current participant count |
-| POST   | `/activities/{activity_name}/signup?email=student@mergington.edu` | Sign up for an activity                                             |
+| POST   | `/auth/login`                                                      | Sign in as a teacher                                                |
+| GET    | `/auth/me`                                                         | Get the signed-in teacher                                           |
+| POST   | `/auth/logout`                                                     | Sign out                                                            |
+| POST   | `/activities/{activity_name}/signup?email=student@mergington.edu` | Sign up a student (teacher login required)                          |
+| DELETE | `/activities/{activity_name}/unregister?email=student@mergington.edu` | Unregister a student (teacher login required)                     |
+
+Visitors can view activity participants, but only authenticated teachers can
+sign up or unregister students. Teacher accounts are stored in the ignored
+`src/teachers.json` file; sessions expire after 12 hours or when the server
+restarts.
 
 ## Data Model
 
